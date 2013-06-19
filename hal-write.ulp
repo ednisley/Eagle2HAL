@@ -1,1 +1,414 @@
-../ulp/hal-write.ulp
+/******************************************************************************
+ * HAL-Configurator
+ *
+ * Author: Martin Schoeneck 2008
+ * Additional gates and tweaks: Ed Nisley KE4ZNU 2010
+ *  Charalampos Alexopoulos 2011
+ *  Ed Nisley KE4ZNU 2013
+ *****************************************************************************/
+#usage "<h1>HAL-Configurator</h1>Start from a Schematic where symbols from hal-config.lbr are used!";
+
+string output_path =    "./";
+string dev_loadrt =     "LOADRT";
+string dev_loadusr =    "LOADUSR";
+string dev_thread =     "THREAD";
+string dev_parameter =  "PARAMETER";
+
+string dev_names[] = {
+"CONSTANT",								// must be first entry to make set_constants() work
+"ABS",				// 2.4
+"AND2",
+"BLEND",			// 2.4
+"CHARGE-PUMP",		// 2.4
+"COMP",
+"CONV_S32_FLOAT",	// 2.4
+"CONV_FLOAT_S32",	// 2.4
+"CONV_S32_BIT",	    // 2.4
+"CONV_BIT_S32",	    // 2.4
+"CONV_BIT_U32",	    // 2.4
+"DDT",				// 2.4
+"DEADZONE",			// 2.4
+"DEBOUNCE",			// 2.4
+"EDGE",
+"ENCODER",			// 2.4
+"ENCODER-RATIO",	// 2.4
+"ESTOP-LATCH",
+"FLIPFLOP",
+"FREQGEN",			// 2.4
+"LIMIT1",			// 2.4
+"LOWPASS",
+"MULT2",			// 2.4
+"MUX2",
+"MUX4",				// 2.4
+"MUX8",				// 2.4
+"NEAR",				// 2.4
+"NOT",
+"ONESHOT",
+"OR2",
+"SAMPLER",			// 2.4
+"SCALE",			// 2.4
+"SIGGEN",			// 2.4
+"STEPGEN",			// 2.4
+"SELECT8",			// 2.4
+"SUM2",
+"TIMEDELAY",		// 2.4
+"TOGGLE",			// 2.4
+"UPDOWN",			// 2.4
+"WCOMP",			// 2.4
+"XOR2",				// 2.4
+""					// end flag
+};
+
+
+/*******************************************************************************
+ * Global Stuff
+ ******************************************************************************/
+
+
+string FileName;
+string ProjectPath;
+string ProjectName;
+
+void Info(string Message) {
+	dlgMessageBox(";<b>Info</b><p>\n" + Message);
+}
+
+void Warn(string Message) {
+	dlgMessageBox("!<b>Warning</b><p>\n" + Message + "<p>see usage");
+}
+
+void Error(string Message) {
+	dlgMessageBox(":<hr><b>Error</b><p>\n" + Message + "<p>see usage");
+	exit(1);
+}
+
+string replace(string str, char a, char b) {
+	// in string str replace a with b
+	int pos = -1;
+	do {
+		// find that character
+		pos = strchr(str, a);
+		// replace if found
+		if(pos >= 0) {
+			str[pos] = b;
+		}
+	} while(pos >= 0);
+
+	return str;
+}
+
+
+
+// the part name contains an index and is written in capital letters
+string get_module_name(UL_PART P) {
+	// check module name, syntax: INDEX:NAME
+	string mod_name = strlwr(P.name);
+	// split string at the : if exists
+	string a[];
+	int c = strsplit(a, mod_name, ':');
+	mod_name = a[c-1];
+	// if name starts with '[' we need uppercase letters
+	if(mod_name[0] == '[') {
+		mod_name = strupr(mod_name);
+	}
+
+	return mod_name;
+}
+
+
+
+string comment(string mess) {
+	string str = "\n\n####################################################\n";
+	if(mess != "") {
+		str += "# " + mess + "\n";
+	}
+
+	return str;
+}
+
+// if this is a device for loading a module, load it (usr/rt)
+string load_module(UL_PART P) {
+	string str = "";
+
+	// it's a module if the device's name starts with LOADRT/LOADUSR
+	if((strstr(P.device.name, dev_loadrt) == 0) ||
+	   (strstr(P.device.name, dev_loadusr) == 0)) {
+
+		// now add the string to our script
+		str += P.value + "\n";
+	}
+
+	return str;
+}
+
+
+// count used digital gates (and, or, etc) and load module if neccessary
+string load_blocks() {
+	string str = "";
+
+	int index;
+
+	int dev_counters[];
+	string dname[];
+
+	// count the gates that are used
+	schematic(S) { S.parts(P) {
+		strsplit(dname,P.device.name,'.');		// extract first part of name
+		if ("" != lookup(dev_names,dname[0],0)) {
+			for (index = 0;  (dname[0] != dev_names[index]) ; index++) {
+				continue;
+			}
+			dev_counters[index]++;
+		}
+	} }
+
+// force lowercase module names...
+
+	for (index = 0; ("" != dev_names[index]) ; index++) {
+		if (dev_counters[index]) {
+			sprintf(str,"%sloadrt %s\t\tcount=%d\n",str,strlwr(dev_names[index]),dev_counters[index]);
+		}
+	}
+
+	return str;
+}
+
+
+string hook_function(UL_NET N) {
+	string str = "";
+
+	// is this net connected to a thread (work as functions here)?
+	int    noclkpins       = 0;
+	string thread_name     = "";  // this net should be connected to a thread
+	string thread_position = "";
+	N.pinrefs(PR) {
+		// this net is connected to a clk-pin
+		if(PR.pin.function == PIN_FUNCTION_FLAG_CLK) {
+			// check the part: is it a thread-device?
+			if(strstr(PR.part.device.name, dev_thread) == 0) {
+				// we need the name of the thread
+				thread_name = strlwr(PR.part.name);
+				// and we need the position (position _ is ignored)
+				thread_position = strlwr(PR.pin.name);
+				thread_position = replace(thread_position, '_', ' ');
+			}
+		} else {
+			// no clk-pin, this is no function-net
+			noclkpins++;
+			break;
+		}
+	}
+
+
+	// found a thread?
+	if(noclkpins == 0 && thread_name != "") {
+		// all the other pins are interesting now
+		N.pinrefs(PR) {
+			// this pin does not belong to the thread
+			if(strstr(PR.part.device.name, dev_thread) != 0) {
+				// name of the pin is name of the function
+				//string function_name = strlwr(PR.pin.name);
+				string function_name = strlwr(PR.instance.gate.name);
+				// if functionname starts with a '.', it will be appended to the modulename
+				if(function_name[0] == '.') {
+					// if the name is only a point, it will be ignored
+					if(strlen(function_name) == 1) {
+						function_name = "";
+					}
+					function_name = get_module_name(PR.part) + function_name;
+				}
+				str += "addf " + function_name + "\t\t" + thread_name + "\t" + thread_position + "\n";
+			}
+		}
+	}
+
+	return str;
+}
+
+
+string set_parameter(UL_NET N) {
+	string str = "";
+
+	// is this net connected to a parameter-device?
+	int    nodotpins       = 0;
+	string parameter_value = "";
+	N.pinrefs(PR) {
+		// this net is connected to a dot-pin
+		if(PR.pin.function == PIN_FUNCTION_FLAG_DOT) {
+			// check the part: is it a parameter-device?
+//			str += "** dev name [" + PR.part.device.name + "] [" + dev_parameter + "]\n";
+			if(strstr(PR.part.device.name, dev_parameter) == 0) {
+				// we need the value of that parameter
+				parameter_value = PR.part.value;
+//				str += "**  value [" + PR.part.value +"]\n";
+			}
+		} else {
+			// no clk-pin, this is no function-net
+			nodotpins++;
+			break;
+		}
+	}
+
+
+	// found a parameter?
+	if(nodotpins == 0 && parameter_value != "") {
+		// all the other pins are interesting now
+		N.pinrefs(PR) {
+//			str += "** dev name [" + PR.part.device.name + "] [" + dev_parameter + "]\n";
+			// this pin does not belong to the parameter-device
+			if(strstr(PR.part.device.name, dev_parameter) != 0) {
+				// name of the pin is name of the function
+				//string parameter_name = strlwr(PR.pin.name);
+				string parameter_name = strlwr(PR.instance.gate.name);
+				// if functionname starts with a '.', it will be appended to the modulename
+//				str += "** param (gate) name [" + parameter_name + "]\n";
+				if(parameter_name[0] == '.') {
+					// if the name is only a point, it will be ignored
+					if(strlen(parameter_name) == 1) {
+						parameter_name = "";
+					}
+					parameter_name = get_module_name(PR.part) + parameter_name;
+//					str += "** param (part) name [" + parameter_name + "]\n";
+				}
+				str += "setp " + parameter_name + "\t" + parameter_value + "\n";
+			}
+		}
+	}
+
+	return str;
+}
+
+// if this is a 'constant'-device, set its value
+// NOTE: this is hardcoded to use the first entry in the dev_names[] array!
+string set_constants(UL_PART P) {
+	string str = "";
+
+	// 'constant'-device?
+	if(strstr(P.device.name, dev_names[0]) == 0) {
+		str += "setp " + get_module_name(P) + ".value\t" + P.value + "\n";
+	}
+
+	return str;
+}
+
+string connect_net(UL_NET N) {
+	string str = "";
+
+	// find all neccessary net-members
+	string pins = "";
+	N.pinrefs(P) {
+		// only non-functional pins are connected
+		if(P.pin.function == PIN_FUNCTION_FLAG_NONE) {
+			string pin_name =  strlwr(P.pin.name);
+			string part_name = strlwr(P.part.name);
+			pin_name =  replace(pin_name,  '$', '_');
+			part_name = replace(part_name, '$', '_');
+			pins += part_name + "." + pin_name + " ";
+		}
+	}
+
+	if(pins != "") {
+		string net_name = strlwr(N.name);
+		net_name = replace(net_name, '$', '_');
+		str += "net " + net_name + " " + pins + "\n";
+	}
+
+	return str;
+}
+
+
+/*******************************************************************************
+ * Main program.
+ ******************************************************************************/
+// is the schematic editor running?
+if (!schematic) {
+	Error("No Schematic!<br>This program will only work in the schematic editor.");
+}
+
+schematic(S) {
+	ProjectPath = filedir(S.name);
+	ProjectName = filesetext(filename(S.name), "");
+}
+
+// build configuration
+
+string cs = "# HAL config file automatically generated by Eagle-CAD ULP:\n";
+cs += "# [" + argv[0] + "]\n";
+cs += "# (C) Martin Schoeneck.de 2008\n";
+cs += "# Charalampos Alexopoulos 2011\n";
+cs += "# Mods Ed Nisley KE4ZNU 2010 2013\n";
+
+FileName = ProjectPath + ProjectName + ".hal";
+
+cs += "# Path        [" + ProjectPath + "]\n";
+cs += "# ProjectName [" + ProjectName + "]\n";
+
+// ask for a filename: where should we write the configuration?
+
+FileName = dlgFileSave("Save Configuration", FileName, "*.hal");
+
+if(!FileName) {
+	exit(0);
+}
+
+cs += "# File name   [" + FileName + "]\n";
+cs += "# Created     [" + t2string(time(),"hh:mm:ss dd-MMM-yyyy") + "]\n\n";
+
+schematic(S) {
+	// load modules
+	cs += comment("Load realtime and userspace modules");
+	S.parts(P) {
+		cs += load_module(P);
+	}
+
+	// load blocks
+	cs += load_blocks();
+
+	// add functions
+	cs += comment("Hook functions into threads");
+	S.nets(N) {
+		cs += hook_function(N);
+	}
+
+	// set parameters
+	cs += comment("Set parameters");
+	S.nets(N) {
+		cs += set_parameter(N);
+	}
+
+
+	// set constant values
+	cs += comment("Set constants");
+	S.parts(P) {
+		cs += set_constants(P);
+	}
+
+
+	// build nets and connect them
+	cs += comment("Connect Modules with nets");
+	S.nets(N) {
+		cs += connect_net(N);
+	}
+}
+
+
+
+// open/overwrite the target file to save the configuration
+output(FileName, "wt") {
+	printf(cs);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
