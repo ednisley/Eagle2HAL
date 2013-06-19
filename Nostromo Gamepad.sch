@@ -1,0 +1,1 @@
+../projects/LinuxCNC HAL Configuration/Nostromo Gamepad.sch
